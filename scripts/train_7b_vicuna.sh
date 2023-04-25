@@ -1,4 +1,4 @@
-torchrun --nproc_per_node=4 --master_port=20001 fastchat/train/train_mem.py \
+torchrun --nproc_per_node=4 --master_port=20001 train.py \
     --model_name_or_path ~/model_weights/llama-7b  \
     --data_path ~/datasets/sharegpt_20230322_clean_lang_split_identity.json \
     --bf16 True \

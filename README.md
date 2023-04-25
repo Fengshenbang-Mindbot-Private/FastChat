@@ -22,33 +22,6 @@ Join our [Discord](https://discord.gg/h6kCZb72G7) server and follow our [Twitter
 - [Evaluation](#evaluation)
 - [Fine-tuning](#fine-tuning)
 
-## Install
-
-### Method 1: With pip
-
-```bash
-pip3 install fschat
-```
-
-### Method 2: From source
-
-1. Clone this repository and navigate to the FastChat folder
-```bash
-git clone https://github.com/lm-sys/FastChat.git
-cd FastChat
-```
-
-If you are running on Mac:
-```bash
-brew install rust cmake
-```
-
-2. Install Package
-```bash
-pip3 install --upgrade pip  # enable PEP 660 support
-pip3 install -e .
-```
-
 ## Vicuna Weights
 We release [Vicuna](https://vicuna.lmsys.org/) weights as delta weights to comply with the LLaMA model license.
 You can add our delta to the original LLaMA weights to obtain the Vicuna weights. Instructions:
@@ -283,7 +256,7 @@ We use similar hyperparameters as the Stanford Alpaca.
 ### Fine-tuning Vicuna-7B with Local GPUs
 You can use the following command to train Vicuna-7B with 4 x A100 (40GB).
 ```bash
-torchrun --nproc_per_node=4 --master_port=20001 fastchat/train/train_mem.py \
+torchrun --nproc_per_node=4 --master_port=20001 train.py \
     --model_name_or_path ~/model_weights/llama-7b  \
     --data_path playground/data/dummy.json \
     --bf16 True \
@@ -310,25 +283,3 @@ torchrun --nproc_per_node=4 --master_port=20001 fastchat/train/train_mem.py \
 ```
 
 If you meet out-of-memory during model saving, see solutions [here](https://github.com/pytorch/pytorch/issues/98823).
-
-### Fine-tuning on Any Cloud with SkyPilot
-[SkyPilot](https://github.com/skypilot-org/skypilot) is a framework built by UC Berkeley for easily and cost effectively running ML workloads on any cloud (AWS, GCP, Azure, Lambda, etc.). 
-To use SkyPilot, install it with the following command and setup the cloud credentials locally following the instructions [here](https://skypilot.readthedocs.io/en/latest/getting-started/installation.html).
-```bash
-# Install skypilot from the master branch
-pip install git+https://github.com/skypilot-org/skypilot.git
-```
-#### Vicuna
-Vicuna can be trained on 8 A100 GPUs with 80GB memory. The following command will automatically launch a node satisfying the requirement, setup and run the training job on it.
-```bash
-sky launch -c vicuna -s scripts/train-vicuna.yaml --env WANDB_API_KEY
-```
-Other options are also valid:
-```bash
-# Launch it on managed spot to save 3x cost (train Vicuna-13B with around $300)
-sky spot launch -n vicuna scripts/train-vicuna.yaml --env WANDB_API_KEY
-
-# Train a 7B model
-sky launch -c vicuna -s scripts/train-vicuna.yaml --env WANDB_API_KEY --env MODEL_SIZE=7
-```
-Note: Please make sure the `WANDB_API_KEY` has been setup on your local machine. You can find the API key on your [wandb profile page](https://wandb.ai/authorize). If you would like to train the model without using wandb, you can replace the `--env WANDB_API_KEY` flag with `--env WANDB_MODE=offline`.
