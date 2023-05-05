@@ -1,9 +1,10 @@
-import datetime
 import logging
 import logging.handlers
 import os
 import sys
 import json
+import warnings
+import platform
 
 import requests
 import torch
@@ -30,7 +31,14 @@ def build_logger(logger_name, logger_filename):
 
     # Set the format of root handlers
     if not logging.getLogger().handlers:
-        logging.basicConfig(level=logging.INFO, encoding="utf-8")
+        if sys.version_info[1] >= 9:
+            # This is for windows
+            logging.basicConfig(level=logging.INFO, encoding="utf-8")
+        else:
+            if platform.system() == "Windows":
+                warnings.warn("If you are running on Windows, "
+                              "we recommend you use Python >= 3.9 for UTF-8 encoding.")
+            logging.basicConfig(level=logging.INFO)
     logging.getLogger().handlers[0].setFormatter(formatter)
 
     # Redirect stdout and stderr to loggers
@@ -157,3 +165,13 @@ def pretty_print_semaphore(semaphore):
     if semaphore is None:
         return "None"
     return f"Semaphore(value={semaphore._value}, locked={semaphore.locked()})"
+
+
+get_window_url_params_js = """
+function() {
+    const params = new URLSearchParams(window.location.search);
+    url_params = Object.fromEntries(params);
+    console.log("url_params", url_params);
+    return url_params;
+    }
+"""
