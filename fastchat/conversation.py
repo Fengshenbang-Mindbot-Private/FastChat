@@ -284,6 +284,15 @@ conv_gpt35 = Conversation(
     sep=None,
 )
 
+conv_mindbot_7b_20230405 = Conversation(
+    system="",
+    roles=("Human:", "Assistant:"),
+    messages=(),
+    offset=0,
+    sep_style=SeparatorStyle.NO_COLON_SINGLE,
+    sep="\n\n",
+)
+
 conv_templates = {
     "baize": conv_baize,
     "conv_one_shot": conv_one_shot,
@@ -293,6 +302,7 @@ conv_templates = {
     "stablelm": conv_stablelm,
     "vicuna_v1.1": conv_vicuna_v1_1,
     "rwkv": conv_rwkv,
+    "mindbot_7b_20230405": conv_mindbot_7b_20230405,
 }
 
 
@@ -314,11 +324,19 @@ def get_default_conv_template(model_name):
         return conv_rwkv
     elif "gpt-3.5-turbo" in model_name:
         return conv_gpt35
+    elif "mindbot_7b_20230405" in model_name:
+        return conv_mindbot_7b_20230405
     return conv_one_shot
 
 
 if __name__ == "__main__":
-    conv = conv_templates["vicuna_v1.1"].copy()
+    import argparse
+    parser = argparse.ArgumentParser(description="")
+    #type是要传入的参数的数据类型  help是该参数的提示信息
+    parser.add_argument("--model_name", type=str, help="", default="vicuna_v1.1")
+    args = parser.parse_args() 
+
+    conv = conv_templates[args.model_name].copy()
     conv.append_message(conv.roles[0], "Hello!")
     conv.append_message(conv.roles[1], "Hi!")
     conv.append_message(conv.roles[0], "How are you?")

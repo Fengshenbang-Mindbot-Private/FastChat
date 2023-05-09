@@ -1,20 +1,11 @@
 # FastChat
-| [Demo](https://chat.lmsys.org/) | [Arena](https://arena.lmsys.org) | [Discord](https://discord.gg/h6kCZb72G7) | [Twitter](https://twitter.com/lmsysorg) |
-
 An open platform for training, serving, and evaluating large language model based chatbots.
 
 ## Release
-<p align="center">
-<a href="https://vicuna.lmsys.org"><img src="assets/vicuna_logo.jpeg" width="20%"></a>
-</p>
-
 - 🔥 We released **FastChat-T5** compatible with commercial usage. Checkout [weights](#fastchat-t5).
 - 🔥 We released **Vicuna: An Open-Source Chatbot Impressing GPT-4 with 90% ChatGPT Quality**. Checkout the blog [post](https://vicuna.lmsys.org) and [demo](https://chat.lmsys.org/).
 
-<a href="https://chat.lmsys.org"><img src="assets/demo_narrow.gif" width="70%"></a>
-
 ## Contents
-- [Install](#install)
 - [Model Weights](#model-weights)
 - [Inference with Command Line Interface](#inference-with-command-line-interface)
 - [Serving with Web GUI](#serving-with-web-gui)
@@ -60,14 +51,6 @@ See [docs/vicuna_weights_version.md](docs/vicuna_weights_version.md) for all ver
 You can try these methods to reduce the CPU RAM requirement of weight conversion.
 1. Append `--low-cpu-mem` to the commands above, which will split large weight files into smaller ones and use the disk as temporary storage. This can keep the peak memory at less than 16GB.
 2. Create a large swap file and rely on the operating system to automatically utilize the disk as virtual memory.
-
-### FastChat-T5
-Simply run the line below to start chatting.
-It will automatically download the weights from a Hugging Face [repo](https://huggingface.co/lmsys/fastchat-t5-3b-v1.0). 
-
-```bash
-python3 -m fastchat.serve.cli --model-path lmsys/fastchat-t5-3b-v1.0
-```
 
 ## Inference with Command Line Interface
 
