@@ -1,4 +1,5 @@
 from typing import List, Optional, Tuple
+import logging
 
 import torch
 from torch import nn
@@ -7,8 +8,9 @@ import transformers
 from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
 
 from einops import rearrange
-
-from flash_attn.flash_attn_interface import flash_attn_unpadded_qkvpacked_func
+from flash_attn.flash_attn_interface import (  # pip3 install "flash-attn>=2.0"
+    flash_attn_varlen_qkvpacked_func,
+)
 from flash_attn.bert_padding import unpad_input, pad_input
 
 
@@ -74,7 +76,7 @@ def forward(
         cu_q_lens = torch.arange(
             0, (bsz + 1) * q_len, step=q_len, dtype=torch.int32, device=qkv.device
         )
-        output = flash_attn_unpadded_qkvpacked_func(
+        output = flash_attn_varlen_qkvpacked_func(
             qkv, cu_q_lens, max_s, 0.0, softmax_scale=None, causal=True
         )
         output = rearrange(output, "(b s) ... -> b s ...", b=bsz)
@@ -85,7 +87,7 @@ def forward(
         x_unpad = rearrange(
             x_unpad, "nnz (three h d) -> nnz three h d", three=3, h=nheads
         )
-        output_unpad = flash_attn_unpadded_qkvpacked_func(
+        output_unpad = flash_attn_varlen_qkvpacked_func(
             x_unpad, cu_q_lens, max_s, 0.0, softmax_scale=None, causal=True
         )
         output = rearrange(
@@ -108,6 +110,12 @@ def _prepare_decoder_attention_mask(
 
 
 def replace_llama_attn_with_flash_attn():
+    cuda_major, cuda_minor = torch.cuda.get_device_capability()
+    if cuda_major < 8:
+        logging.warning(
+            "Flash attention is only supported on A100 or H100 GPU during training due to head dim > 64 backward."
+            "ref: https://github.com/HazyResearch/flash-attention/issues/190#issuecomment-1523359593"
+        )
     transformers.models.llama.modeling_llama.LlamaModel._prepare_decoder_attention_mask = (
         _prepare_decoder_attention_mask
     )

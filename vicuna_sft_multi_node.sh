@@ -5,9 +5,8 @@
 #SBATCH --ntasks-per-node=1 # total number of tasks across all nodes
 #SBATCH --cpus-per-task=16 # cpu-cores per task (>1 if multi-threaded tasks)
 #SBATCH --mem-per-cpu=32G # memory per cpu-core (4G is default)
-#SBATCH --gres=gpu:8 # number of gpus per node
-#SBATCH -x dgx047
-#SBATCH --reservation=acagpt
+#SBATCH --gres=gpu:hgx:8 # number of gpus per node
+#SBATCH -p pot # number of gpus per node
 
 #SBATCH -o ./log/%x-%j.log # output and error log file names (%x for job id)
 #SBATCH -e ./log/%x-%j.err # output and error log file names (%x for job id)
@@ -24,7 +23,7 @@ export LAUNCHER="torchrun --nnodes=$NNODES --nproc_per_node=$GPUS_PER_NODE --mas
 FSDP_STRATEGY="full_shard auto_wrap"
 
 export CMD=" train.py \
-    --model_name_or_path /cognitive_comp/pankunhao/pretrained/pytorch/llama-13b \
+    --model_name_or_path /cognitive_comp/songdingjie/pretrained_models/llama-13b/llama-13b \
     --data_path ./playground/data/dummy.json \
     --bf16 True \
     --output_dir /cognitive_comp/pankunhao/code/FastChat/output \

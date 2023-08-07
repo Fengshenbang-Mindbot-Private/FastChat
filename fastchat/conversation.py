@@ -16,6 +16,7 @@ class SeparatorStyle(Enum):
     BAIZE = auto()
     DOLLY = auto()
     RWKV = auto()
+    ZIYA = auto()
 
 
 @dataclasses.dataclass
@@ -63,9 +64,18 @@ class Conversation:
                 else:
                     ret += role + ":"
             return ret
+        elif self.sep_style == SeparatorStyle.ZIYA:
+            seps = [self.sep, self.sep2]
+            ret = ""
+            for i, (role, message) in enumerate(self.messages):
+                if message:
+                    ret += role + ": " + message + seps[i % 2]
+                else:
+                    ret += role + ":"
+            return ret
         elif self.sep_style == SeparatorStyle.NO_COLON_SINGLE:
             ret = self.system
-            for role, message in self.messages:
+            for i, (role, message) in enumerate(self.messages):
                 if message:
                     ret += role + message + self.sep
                 else:
@@ -284,6 +294,15 @@ conv_gpt35 = Conversation(
     sep=None,
 )
 
+conv_starcoder = Conversation(
+    system="Below is a dialogue between a human user and an AI assistant. The assistant is happy to help with almost anything, and will do its best to understand exactly what is needed.",
+    roles=("user", "assistant"),
+    messages=(),
+    offset=0,
+    sep_style=SeparatorStyle.ADD_COLON_SINGLE,
+    sep="<|endoftext|>",
+)
+
 conv_mindbot_7b_20230405 = Conversation(
     system="",
     roles=("Human:", "Assistant:"),
@@ -291,6 +310,16 @@ conv_mindbot_7b_20230405 = Conversation(
     offset=0,
     sep_style=SeparatorStyle.NO_COLON_SINGLE,
     sep="\n\n",
+)
+
+conv_ziya_13b = Conversation(
+    system="",
+    roles=("<human>", "<bot>"),
+    messages=(),
+    offset=0,
+    sep_style=SeparatorStyle.ZIYA,
+    sep="\n",
+    sep2="</s>",
 )
 
 conv_templates = {
@@ -302,7 +331,9 @@ conv_templates = {
     "stablelm": conv_stablelm,
     "vicuna_v1.1": conv_vicuna_v1_1,
     "rwkv": conv_rwkv,
+    "starcoder": conv_starcoder,
     "mindbot_7b_20230405": conv_mindbot_7b_20230405,
+    "ziya_13b": conv_ziya_13b
 }
 
 
@@ -324,8 +355,12 @@ def get_default_conv_template(model_name):
         return conv_rwkv
     elif "gpt-3.5-turbo" in model_name:
         return conv_gpt35
+    elif "starcoder" in model_name:
+        return conv_starcoder
     elif "mindbot_7b_20230405" in model_name:
         return conv_mindbot_7b_20230405
+    elif "ziya_13b" in model_name:
+        return conv_ziya_13b
     return conv_one_shot
 
 
@@ -340,5 +375,5 @@ if __name__ == "__main__":
     conv.append_message(conv.roles[0], "Hello!")
     conv.append_message(conv.roles[1], "Hi!")
     conv.append_message(conv.roles[0], "How are you?")
-    conv.append_message(conv.roles[1], None)
+    conv.append_message(conv.roles[1], "Fine.")
     print(conv.get_prompt())

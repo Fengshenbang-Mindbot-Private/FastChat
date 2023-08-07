@@ -4,7 +4,7 @@
 #SBATCH --nodes=1 # node count
 #SBATCH --ntasks-per-node=1 # total number of tasks across all nodes
 #SBATCH --cpus-per-task=16 # cpu-cores per task (>1 if multi-threaded tasks)
-#SBATCH --mem-per-cpu=32G # memory per cpu-core (4G is default)
+#SBATCH --mem-per-cpu=48G # memory per cpu-core (4G is default)
 #SBATCH --gres=gpu:hgx:8 # number of gpus per node
 #SBATCH -p pot # number of gpus per node
 
@@ -12,6 +12,7 @@
 #SBATCH -e ./log/%x-%j.err # output and error log file names (%x for job id)
 
 # pot-preempted
+# --warmup_ratio 0.03
 
 NNODES=1
 GPUS_PER_NODE=8
@@ -19,26 +20,28 @@ GPUS_PER_NODE=8
 MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
 MASTER_PORT=$(shuf -n 1 -i 40000-65535)
 
+WANDB_PROJECT="FastChat"
+export WANDB_PROJECT
+
 torchrun --nproc_per_node=$GPUS_PER_NODE --master_addr=$MASTER_ADDR --master_port=$MASTER_PORT train.py \
-    --model_name_or_path "/cognitive_comp/pankunhao/code/FastChat/new_output" \
+    --model_name_or_path "/cognitive_comp/pankunhao/code/FastChat/model_ckpt/general_0625/checkpoint-4166" \
     --data_path /cognitive_comp/pankunhao/data/writing/sft_data/merged.json \
     --bf16 True \
-    --output_dir /cognitive_comp/pankunhao/code/FastChat/new_writing_output_fdsp \
-    --num_train_epochs 3 \
+    --output_dir /cognitive_comp/pankunhao/code/FastChat/model_ckpt/writing_0804 \
+    --num_train_epochs 10 \
     --per_device_train_batch_size 2 \
     --per_device_eval_batch_size 2 \
     --gradient_accumulation_steps 8 \
     --evaluation_strategy "no" \
     --save_strategy "epoch" \
-    --save_total_limit 3 \
-    --learning_rate 1e-5 \
+    --save_total_limit 7 \
+    --learning_rate 8e-6 \
     --weight_decay 0. \
-    --warmup_ratio 0.03 \
+    --warmup_ratio 0.1 \
     --lr_scheduler_type "cosine" \
     --logging_steps 1 \
-    --fsdp "full_shard auto_wrap" \
-    --fsdp_transformer_layer_cls_to_wrap 'LlamaDecoderLayer' \
+    --deepspeed "ds_config.json" \
     --tf32 True \
-    --model_max_length 2048 \
+    --model_max_length 8192 \
     --gradient_checkpointing True \
     --lazy_preprocess True

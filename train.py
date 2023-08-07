@@ -19,12 +19,22 @@ import json
 import pathlib
 from typing import Dict, Optional, Sequence
 
+# Make it more memory efficient by monkey patching the LLaMA model with FlashAttn.
+
+# Need to call this before importing transformers.
+from fastchat.train.llama_flash_attn_monkey_patch import (
+    replace_llama_attn_with_flash_attn,
+)
+
+replace_llama_attn_with_flash_attn()
+
 import numpy as np
 import torch
 from torch.utils.data import Dataset
 import transformers
 from transformers import Trainer
 from transformers.trainer_pt_utils import LabelSmoother
+import wandb
 
 from fastchat.conversation import get_default_conv_template, SeparatorStyle
 
@@ -54,6 +64,7 @@ class TrainingArguments(transformers.TrainingArguments):
             "Maximum sequence length. Sequences will be right padded (and possibly truncated)."
         },
     )
+    report_to: str = field(default="wandb")
 
 
 local_rank = None
@@ -76,12 +87,11 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer,
         del state_dict
         trainer._save(output_dir, state_dict=cpu_state_dict)  # noqa
 
-
 def preprocess(
     sources,
     tokenizer: transformers.PreTrainedTokenizer,
 ) -> Dict:
-    conv = get_default_conv_template("vicuna").copy()
+    conv = get_default_conv_template("ziya_13b").copy()
     roles = {"human": conv.roles[0], "gpt": conv.roles[1]}
 
     # Apply prompt templates
@@ -91,12 +101,20 @@ def preprocess(
             # Skip the first one if it is not from human
             source = source[1:]
 
+        checking_flag = True
+
         conv.messages = []
         for j, sentence in enumerate(source):
             role = roles[sentence["from"]]
-            assert role == conv.roles[j % 2], f"{i}"
+            if role != conv.roles[j % 2]:
+                print("error source:")
+                print(source)
+                checking_flag = False
+                break
             conv.append_message(role, sentence["value"])
-        conversations.append(conv.get_prompt())
+        
+        if checking_flag:
+            conversations.append(conv.get_prompt())
 
     # Tokenize conversations
     input_ids = tokenizer(
@@ -108,7 +126,8 @@ def preprocess(
     ).input_ids
     targets = input_ids.clone()
 
-    assert conv.sep_style == SeparatorStyle.ADD_COLON_TWO
+    assert conv.sep_style == SeparatorStyle.ADD_COLON_TWO \
+        or conv.sep_style == SeparatorStyle.ZIYA
 
     # Mask targets
     sep = conv.sep + conv.roles[1] + ": "
@@ -153,7 +172,6 @@ def preprocess(
         labels=targets,
         attention_mask=input_ids.ne(tokenizer.pad_token_id),
     )
-
 
 class SupervisedDataset(Dataset):
     """Dataset for supervised fine-tuning."""
@@ -219,7 +237,7 @@ def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer,
 
     # Split train/test
     perm = np.random.permutation(len(raw_data))
-    split = int(len(perm) * 0.98)
+    split = int(len(perm) * 0.995)
     train_indices = perm[:split]
     eval_indices = perm[split:]
     train_raw_data = [raw_data[i] for i in train_indices]
@@ -241,6 +259,7 @@ def train():
     model = transformers.AutoModelForCausalLM.from_pretrained(
         model_args.model_name_or_path,
         cache_dir=training_args.cache_dir,
+        trust_remote_code=True,
     )
     model.config.use_cache = False
     tokenizer = transformers.AutoTokenizer.from_pretrained(
@@ -249,13 +268,16 @@ def train():
         model_max_length=training_args.model_max_length,
         padding_side="right",
         use_fast=False,
+        trust_remote_code=True,
     )
     
     DEFAULT_PAD_TOKEN = "[PAD]"
     DEFAULT_EOS_TOKEN = "</s>"
     DEFAULT_BOS_TOKEN = "</s>"
     DEFAULT_UNK_TOKEN = "</s>"
-    if "llama" in model_args.model_name_or_path:
+    """
+    model_path = str(model_args.model_name_or_path)
+    if "llama" in model_path.lower():
         tokenizer.add_special_tokens(
             {
                 "eos_token": DEFAULT_EOS_TOKEN,
@@ -263,7 +285,7 @@ def train():
                 "unk_token": DEFAULT_UNK_TOKEN,
             }
         )
-
+    """
     tokenizer.pad_token = tokenizer.unk_token
 
     data_module = make_supervised_data_module(tokenizer=tokenizer,
@@ -274,6 +296,7 @@ def train():
                       **data_module)
 
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
+        print("resume from checkpoint.")
         trainer.train(resume_from_checkpoint=True)
     else:
         trainer.train()
