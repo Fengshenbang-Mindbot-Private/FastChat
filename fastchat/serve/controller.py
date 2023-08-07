@@ -18,8 +18,13 @@ import numpy as np
 import requests
 import uvicorn
 
-from fastchat.constants import CONTROLLER_HEART_BEAT_EXPIRATION
-from fastchat.utils import build_logger, server_error_msg
+from fastchat.constants import (
+    CONTROLLER_HEART_BEAT_EXPIRATION,
+    WORKER_API_TIMEOUT,
+    ErrorCode,
+    SERVER_ERROR_MSG,
+)
+from fastchat.utils import build_logger
 
 
 logger = build_logger("controller", "controller.log")
@@ -51,7 +56,7 @@ class WorkerInfo:
 def heart_beat_controller(controller):
     while True:
         time.sleep(CONTROLLER_HEART_BEAT_EXPIRATION)
-        controller.remove_stable_workers_by_expiration()
+        controller.remove_stale_workers_by_expiration()
 
 
 class Controller:
@@ -64,8 +69,6 @@ class Controller:
             target=heart_beat_controller, args=(self,)
         )
         self.heart_beat_thread.start()
-
-        logger.info("Init controller")
 
     def register_worker(
         self, worker_name: str, check_heart_beat: bool, worker_status: dict
@@ -186,7 +189,7 @@ class Controller:
         logger.info(f"Receive heart beat. {worker_name}")
         return True
 
-    def remove_stable_workers_by_expiration(self):
+    def remove_stale_workers_by_expiration(self):
         expire = time.time() - CONTROLLER_HEART_BEAT_EXPIRATION
         to_delete = []
         for worker_name, w_info in self.worker_info.items():
@@ -196,33 +199,21 @@ class Controller:
         for worker_name in to_delete:
             self.remove_worker(worker_name)
 
-    def worker_api_generate_stream(self, params):
-        worker_addr = self.get_worker_address(params["model"])
-        if not worker_addr:
-            logger.info(f"no worker: {params['model']}")
-            ret = {
-                "text": server_error_msg,
-                "error_code": 2,
-            }
-            yield json.dumps(ret).encode() + b"\0"
+    def handle_no_worker(self, params):
+        logger.info(f"no worker: {params['model']}")
+        ret = {
+            "text": SERVER_ERROR_MSG,
+            "error_code": ErrorCode.CONTROLLER_NO_WORKER,
+        }
+        return json.dumps(ret).encode() + b"\0"
 
-        try:
-            response = requests.post(
-                worker_addr + "/worker_generate_stream",
-                json=params,
-                stream=True,
-                timeout=15,
-            )
-            for chunk in response.iter_lines(decode_unicode=False, delimiter=b"\0"):
-                if chunk:
-                    yield chunk + b"\0"
-        except requests.exceptions.RequestException as e:
-            logger.info(f"worker timeout: {worker_addr}")
-            ret = {
-                "text": server_error_msg,
-                "error_code": 3,
-            }
-            yield json.dumps(ret).encode() + b"\0"
+    def handle_worker_timeout(self, worker_address):
+        logger.info(f"worker timeout: {worker_address}")
+        ret = {
+            "text": SERVER_ERROR_MSG,
+            "error_code": ErrorCode.CONTROLLER_WORKER_TIMEOUT,
+        }
+        return json.dumps(ret).encode() + b"\0"
 
     # Let the controller act as a worker to achieve hierarchical
     # management. This can be used to connect isolated sub networks.
@@ -238,11 +229,30 @@ class Controller:
                 speed += worker_status["speed"]
                 queue_length += worker_status["queue_length"]
 
+        model_names = sorted(list(model_names))
         return {
-            "model_names": list(model_names),
+            "model_names": model_names,
             "speed": speed,
             "queue_length": queue_length,
         }
+
+    def worker_api_generate_stream(self, params):
+        worker_addr = self.get_worker_address(params["model"])
+        if not worker_addr:
+            yield self.handle_no_worker(params)
+
+        try:
+            response = requests.post(
+                worker_addr + "/worker_generate_stream",
+                json=params,
+                stream=True,
+                timeout=WORKER_API_TIMEOUT,
+            )
+            for chunk in response.iter_lines(decode_unicode=False, delimiter=b"\0"):
+                if chunk:
+                    yield chunk + b"\0"
+        except requests.exceptions.RequestException as e:
+            yield self.handle_worker_timeout(worker_addr)
 
 
 app = FastAPI()

@@ -1,9 +1,12 @@
 """Inference for FastChat models."""
 import abc
 import gc
+import json
 import math
-from typing import Optional
+import os
 import sys
+import time
+from typing import Iterable, Optional, Dict
 import warnings
 
 import psutil
@@ -18,218 +21,149 @@ from transformers import (
     T5Tokenizer,
     AutoConfig,
 )
-
-from fastchat.conversation import (
-    conv_templates,
-    get_default_conv_template,
-    SeparatorStyle,
+from transformers.generation.logits_process import (
+    LogitsProcessorList,
+    RepetitionPenaltyLogitsProcessor,
+    TemperatureLogitsWarper,
+    TopKLogitsWarper,
+    TopPLogitsWarper,
 )
-from fastchat.serve.compression import load_compress_model
-from fastchat.serve.monkey_patch_non_inplace import (
-    replace_llama_attn_with_non_inplace_operations,
+
+from fastchat.conversation import get_conv_template, SeparatorStyle
+from fastchat.model.model_adapter import (
+    load_model,
+    get_conversation_template,
+    get_generate_stream_function,
 )
-from fastchat.serve.serve_chatglm import chatglm_generate_stream
-
-def raise_warning_for_incompatible_cpu_offloading_configuration(device: str, load_8bit: bool, cpu_offloading: bool):
-    if cpu_offloading:
-        if not load_8bit:
-            warnings.warn("The cpu-offloading feature can only be used while also using 8-bit-quantization.\n"
-                          "Use '--load-8bit' to enable 8-bit-quantization\n"
-                          "Continuing without cpu-offloading enabled\n")
-            return False
-        if not "linux" in sys.platform:
-            warnings.warn("CPU-offloading is only supported on linux-systems due to the limited compatability with the bitsandbytes-package\n"
-                          "Continuing without cpu-offloading enabled\n")
-            return False
-        if device != "cuda":
-            warnings.warn("CPU-offloading is only enabled when using CUDA-devices\n"
-                          "Continuing without cpu-offloading enabled\n")
-            return False
-    return cpu_offloading
-
-def get_gpu_memory(max_gpus=None):
-    gpu_memory = []
-    num_gpus = (
-        torch.cuda.device_count()
-        if max_gpus is None
-        else min(max_gpus, torch.cuda.device_count())
-    )
-
-    for gpu_id in range(num_gpus):
-        with torch.cuda.device(gpu_id):
-            device = torch.cuda.current_device()
-            gpu_properties = torch.cuda.get_device_properties(device)
-            total_memory = gpu_properties.total_memory / (1024**3)
-            allocated_memory = torch.cuda.memory_allocated() / (1024**3)
-            available_memory = total_memory - allocated_memory
-            gpu_memory.append(available_memory)
-    return gpu_memory
+from fastchat.modules.gptq import GptqConfig
+from fastchat.modules.awq import AWQConfig
+from fastchat.utils import is_partial_stop, is_sentence_complete, get_context_length
 
 
-def raise_warning_for_old_weights(model_path, model):
-    if "vicuna" in model_path.lower() and isinstance(model, LlamaForCausalLM):
-        if model.model.vocab_size > 32000:
-            warnings.warn(
-                "\nYou are probably using the old Vicuna-v0 model, "
-                "which will generate unexpected results with the "
-                "current fastchat.\nYou can try one of the following methods:\n"
-                "1. Upgrade your weights to the new Vicuna-v1.1: https://github.com/lm-sys/FastChat#vicuna-weights.\n"
-                "2. Use the old conversation template by `python3 -m fastchat.serve.cli --model-path /path/to/vicuna-v0 --conv-template conv_one_shot`\n"
-                "3. Downgrade fschat to fschat==0.1.10 (Not recommonded).\n"
-            )
-
-def load_model(
-    model_path, device, num_gpus, max_gpu_memory=None, load_8bit=False, cpu_offloading=False, debug=False
-):
-    cpu_offloading = raise_warning_for_incompatible_cpu_offloading_configuration(device, load_8bit, cpu_offloading)
-    if device == "cpu":
-        kwargs = {"torch_dtype": torch.float32}
-    elif device == "cuda":
-        kwargs = {"torch_dtype": torch.float16}
-        if num_gpus != 1:
-            kwargs["device_map"] = "auto"
-            if max_gpu_memory is None:
-                kwargs[
-                    "device_map"
-                ] = "sequential"  # This is important for not the same VRAM sizes
-                available_gpu_memory = get_gpu_memory(num_gpus)
-                kwargs["max_memory"] = {
-                    i: str(int(available_gpu_memory[i] * 0.85)) + "GiB"
-                    for i in range(num_gpus)
-                }
-            else:
-                kwargs["max_memory"] = {i: max_gpu_memory for i in range(num_gpus)}
-        print("init_kwargs", kwargs)
-    elif device == "mps":
-        kwargs = {"torch_dtype": torch.float16}
-        # Avoid bugs in mps backend by not using in-place operations.
-        replace_llama_attn_with_non_inplace_operations()
-    else:
-        raise ValueError(f"Invalid device: {device}")
-
-    if cpu_offloading:
-        # raises an error on incompatible platforms
-        from transformers import BitsAndBytesConfig
-        if "max_memory" in kwargs:
-            kwargs["max_memory"]["cpu"] = str(math.floor(psutil.virtual_memory().available / 2**20)) + 'Mib'
-        kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit_fp32_cpu_offload=cpu_offloading)
-        kwargs["load_in_8bit"] = load_8bit
-    elif load_8bit:
-        if num_gpus != 1:
-            warnings.warn("8-bit quantization is not supported for multi-gpu inference.")
-        else:
-            return load_compress_model(model_path=model_path,
-                device=device, torch_dtype=kwargs["torch_dtype"])
-
-    if "chatglm" in model_path:
-        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-        model = AutoModel.from_pretrained(model_path, trust_remote_code=True, **kwargs)
-    elif "dolly" in model_path:
-        tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True)
-        model = AutoModelForCausalLM.from_pretrained(
-            model_path, low_cpu_mem_usage=True, **kwargs
-        )
-        # 50277 means "### End"
-        tokenizer.eos_token_id = 50277
-    elif "pythia" in model_path or "stablelm" in model_path:
-        tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True)
-        model = AutoModelForCausalLM.from_pretrained(
-            model_path, low_cpu_mem_usage=True, **kwargs
-        )
-    elif "t5" in model_path:
-        model = AutoModelForSeq2SeqLM.from_pretrained(model_path,
-                                                      low_cpu_mem_usage=True, **kwargs)
-        tokenizer = T5Tokenizer.from_pretrained(model_path, use_fast=False)
-    elif "RWKV-4" in model_path:
-        from fastchat.serve.rwkv_model import RwkvModel
-        model = RwkvModel(model_path)
-        tokenizer = AutoTokenizer.from_pretrained('EleutherAI/pythia-160m', use_fast=True)
-    else:
-        tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False)
-        model = AutoModelForCausalLM.from_pretrained(
-            model_path, low_cpu_mem_usage=True, **kwargs
-        )
-        raise_warning_for_old_weights(model_path, model)
-
-    if (device == "cuda" and num_gpus == 1 and not cpu_offloading) or device == "mps":
-        model.to(device)
-
-    if debug:
-        print(model)
-
-    return model, tokenizer
+def prepare_logits_processor(
+    temperature: float, repetition_penalty: float, top_p: float, top_k: int
+) -> LogitsProcessorList:
+    processor_list = LogitsProcessorList()
+    # TemperatureLogitsWarper doesn't accept 0.0, 1.0 makes it a no-op so we skip two cases.
+    if temperature >= 1e-5 and temperature != 1.0:
+        processor_list.append(TemperatureLogitsWarper(temperature))
+    if repetition_penalty > 1.0:
+        processor_list.append(RepetitionPenaltyLogitsProcessor(repetition_penalty))
+    if 1e-8 <= top_p < 1.0:
+        processor_list.append(TopPLogitsWarper(top_p))
+    if top_k > 0:
+        processor_list.append(TopKLogitsWarper(top_k))
+    return processor_list
 
 
 @torch.inference_mode()
 def generate_stream(
-    model, tokenizer, params, device, context_len=2048, stream_interval=2
+    model,
+    tokenizer,
+    params: Dict,
+    device: str,
+    context_len: int,
+    stream_interval: int = 2,
+    judge_sent_end: bool = False,
 ):
+    # Read parameters
     prompt = params["prompt"]
     len_prompt = len(prompt)
     temperature = float(params.get("temperature", 1.0))
+    repetition_penalty = float(params.get("repetition_penalty", 1.0))
+    top_p = float(params.get("top_p", 1.0))
+    top_k = int(params.get("top_k", -1))  # -1 means disable
     max_new_tokens = int(params.get("max_new_tokens", 256))
+    echo = bool(params.get("echo", True))
     stop_str = params.get("stop", None)
-    echo = params.get("echo", True)
     stop_token_ids = params.get("stop_token_ids", None) or []
     stop_token_ids.append(tokenizer.eos_token_id)
 
+    logits_processor = prepare_logits_processor(
+        temperature, repetition_penalty, top_p, top_k
+    )
     input_ids = tokenizer(prompt).input_ids
-    input_echo_len = len(input_ids)
-    output_ids = list(input_ids)
 
     if model.config.is_encoder_decoder:
-         max_src_len = context_len
-    else:
-         max_src_len = context_len - max_new_tokens - 8
+        max_src_len = context_len
+    else:  # truncate
+        max_src_len = context_len - max_new_tokens - 1
 
     input_ids = input_ids[-max_src_len:]
+    output_ids = list(input_ids)
+    input_echo_len = len(input_ids)
 
     if model.config.is_encoder_decoder:
-         encoder_output = model.encoder(input_ids=torch.as_tensor([input_ids],
-                                                      device=device))[0]
-         start_ids = torch.as_tensor([[model.generation_config.decoder_start_token_id]],
-                     dtype=torch.int64, device=device)
+        encoder_output = model.encoder(
+            input_ids=torch.as_tensor([input_ids], device=device)
+        )[0]
+        start_ids = torch.as_tensor(
+            [[model.generation_config.decoder_start_token_id]],
+            dtype=torch.int64,
+            device=device,
+        )
 
+    past_key_values = out = None
+    sent_interrupt = False
     for i in range(max_new_tokens):
-        if i == 0:
+        if i == 0:  # prefill
             if model.config.is_encoder_decoder:
-                 out = model.decoder(input_ids=start_ids,
-                                     encoder_hidden_states=encoder_output,
-                                     use_cache=True)
-                 logits = model.lm_head(out[0])
+                out = model.decoder(
+                    input_ids=start_ids,
+                    encoder_hidden_states=encoder_output,
+                    use_cache=True,
+                )
+                logits = model.lm_head(out[0])
             else:
                 out = model(torch.as_tensor([input_ids], device=device), use_cache=True)
                 logits = out.logits
             past_key_values = out.past_key_values
-        else:
+        else:  # decoding
             if model.config.is_encoder_decoder:
-                out = model.decoder(input_ids=torch.as_tensor([[token]], device=device),
-                             encoder_hidden_states=encoder_output,
-                             use_cache=True,
-                             past_key_values=past_key_values)
+                out = model.decoder(
+                    input_ids=torch.as_tensor(
+                        [[token] if not sent_interrupt else output_ids], device=device
+                    ),
+                    encoder_hidden_states=encoder_output,
+                    use_cache=True,
+                    past_key_values=past_key_values if not sent_interrupt else None,
+                )
+                sent_interrupt = False
 
                 logits = model.lm_head(out[0])
             else:
                 out = model(
-                    input_ids=torch.as_tensor([[token]], device=device),
+                    input_ids=torch.as_tensor(
+                        [[token] if not sent_interrupt else output_ids], device=device
+                    ),
                     use_cache=True,
-                    past_key_values=past_key_values,
+                    past_key_values=past_key_values if not sent_interrupt else None,
                 )
+                sent_interrupt = False
                 logits = out.logits
             past_key_values = out.past_key_values
 
-        last_token_logits = logits[0][-1]
+        if logits_processor:
+            if repetition_penalty > 1.0:
+                tmp_output_ids = torch.as_tensor([output_ids], device=logits.device)
+            else:
+                tmp_output_ids = None
+            last_token_logits = logits_processor(tmp_output_ids, logits[:, -1, :])[0]
+        else:
+            last_token_logits = logits[0, -1, :]
 
         if device == "mps":
             # Switch to CPU by avoiding some bugs in mps backend.
             last_token_logits = last_token_logits.float().to("cpu")
 
-        if temperature < 1e-4:
-            token = int(torch.argmax(last_token_logits))
+        if temperature < 1e-5 or top_p < 1e-8:  # greedy
+            _, indices = torch.topk(last_token_logits, 2)
+            tokens = [int(index) for index in indices.tolist()]
         else:
-            probs = torch.softmax(last_token_logits / temperature, dim=-1)
-            token = int(torch.multinomial(probs, num_samples=1))
-
+            probs = torch.softmax(last_token_logits, dim=-1)
+            indices = torch.multinomial(probs, num_samples=2)
+            tokens = [int(token) for token in indices.tolist()]
+        token = tokens[0]
         output_ids.append(token)
 
         if token in stop_token_ids:
@@ -237,6 +171,7 @@ def generate_stream(
         else:
             stopped = False
 
+        # Yield the output tokens
         if i % stream_interval == 0 or i == max_new_tokens - 1 or stopped:
             if echo:
                 tmp_output_ids = output_ids
@@ -245,21 +180,84 @@ def generate_stream(
                 tmp_output_ids = output_ids[input_echo_len:]
                 rfind_start = 0
 
-            output = tokenizer.decode(tmp_output_ids, skip_special_tokens=True, 
-                                      spaces_between_special_tokens=False)
+            output = tokenizer.decode(
+                tmp_output_ids,
+                skip_special_tokens=True,
+                spaces_between_special_tokens=False,
+                clean_up_tokenization_spaces=True,
+            )
+            # TODO: For the issue of incomplete sentences interrupting output, apply a patch and others can also modify it to a more elegant way
+            if judge_sent_end and stopped and not is_sentence_complete(output):
+                if len(tokens) > 1:
+                    token = tokens[1]
+                    output_ids[-1] = token
+                else:
+                    output_ids.pop()
+                stopped = False
+                sent_interrupt = True
+
+            partially_stopped = False
             if stop_str:
-                pos = output.rfind(stop_str, rfind_start)
-                if pos != -1:
-                    output = output[:pos]
-                    stopped = True
-            yield output
+                if isinstance(stop_str, str):
+                    pos = output.rfind(stop_str, rfind_start)
+                    if pos != -1:
+                        output = output[:pos]
+                        stopped = True
+                    else:
+                        partially_stopped = is_partial_stop(output, stop_str)
+                elif isinstance(stop_str, Iterable):
+                    for each_stop in stop_str:
+                        pos = output.rfind(each_stop, rfind_start)
+                        if pos != -1:
+                            output = output[:pos]
+                            stopped = True
+                            break
+                        else:
+                            partially_stopped = is_partial_stop(output, each_stop)
+                            if partially_stopped:
+                                break
+                else:
+                    raise ValueError("Invalid stop field type.")
+
+            # Prevent yielding partial stop sequence
+            if not partially_stopped:
+                yield {
+                    "text": output,
+                    "usage": {
+                        "prompt_tokens": input_echo_len,
+                        "completion_tokens": i,
+                        "total_tokens": input_echo_len + i,
+                    },
+                    "finish_reason": None,
+                }
 
         if stopped:
             break
 
+    # Finish stream event, which contains finish reason
+    if i == max_new_tokens - 1:
+        finish_reason = "length"
+    elif stopped:
+        finish_reason = "stop"
+    else:
+        finish_reason = None
+
+    yield {
+        "text": output,
+        "usage": {
+            "prompt_tokens": input_echo_len,
+            "completion_tokens": i,
+            "total_tokens": input_echo_len + i,
+        },
+        "finish_reason": finish_reason,
+    }
+
+    # Clean
     del past_key_values, out
     gc.collect()
     torch.cuda.empty_cache()
+    if device == "xpu":
+        torch.xpu.empty_cache()
 
 
 class ChatIO(abc.ABC):
@@ -275,6 +273,10 @@ class ChatIO(abc.ABC):
     def stream_output(self, output_stream):
         """Stream output."""
 
+    @abc.abstractmethod
+    def print_output(self, text: str):
+        """Print output."""
+
 
 def chat_loop(
     model_path: str,
@@ -284,46 +286,131 @@ def chat_loop(
     load_8bit: bool,
     cpu_offloading: bool,
     conv_template: Optional[str],
+    conv_system_msg: Optional[str],
     temperature: float,
+    repetition_penalty: float,
     max_new_tokens: int,
     chatio: ChatIO,
-    debug: bool,
+    gptq_config: Optional[GptqConfig] = None,
+    awq_config: Optional[AWQConfig] = None,
+    revision: str = "main",
+    judge_sent_end: bool = True,
+    debug: bool = True,
+    history: bool = True,
 ):
     # Model
     model, tokenizer = load_model(
-        model_path, device, num_gpus, max_gpu_memory, load_8bit, cpu_offloading, debug
+        model_path,
+        device=device,
+        num_gpus=num_gpus,
+        max_gpu_memory=max_gpu_memory,
+        load_8bit=load_8bit,
+        cpu_offloading=cpu_offloading,
+        gptq_config=gptq_config,
+        awq_config=awq_config,
+        revision=revision,
+        debug=debug,
     )
-    is_chatglm = "chatglm" in str(type(model)).lower()
+    generate_stream_func = get_generate_stream_function(model, model_path)
+
+    model_type = str(type(model)).lower()
+    is_t5 = "t5" in model_type
+    is_codet5p = "codet5p" in model_type
+
+    # Hardcode T5's default repetition penalty to be 1.2
+    if is_t5 and repetition_penalty == 1.0:
+        repetition_penalty = 1.2
+
+    # Set context length
+    context_len = get_context_length(model.config)
 
     # Chat
-    if conv_template:
-        conv = conv_templates[conv_template].copy()
-    else:
-        conv = get_default_conv_template(model_path).copy()
+    def new_chat():
+        if conv_template:
+            conv = get_conv_template(conv_template)
+        else:
+            conv = get_conversation_template(model_path)
+        if conv_system_msg is not None:
+            conv.set_system_message(conv_system_msg)
+        return conv
+
+    conv = None
 
     while True:
+        if not history or not conv:
+            conv = new_chat()
+
         try:
             inp = chatio.prompt_for_input(conv.roles[0])
         except EOFError:
             inp = ""
-        if not inp:
+
+        if inp == "!!exit" or not inp:
             print("exit...")
             break
+        elif inp == "!!reset":
+            print("resetting...")
+            conv = new_chat()
+            continue
+        elif inp.startswith("!!save"):
+            args = inp.split(" ", 1)
+
+            if len(args) != 2:
+                print("usage: !!save <filename>")
+                continue
+            else:
+                filename = args[1]
+
+            if not filename.endswith(".json"):
+                filename += ".json"
+
+            print("saving...", filename)
+            with open(filename, "w") as outfile:
+                json.dump(conv.dict(), outfile)
+            continue
+        elif inp.startswith("!!load"):
+            args = inp.split(" ", 1)
+
+            if len(args) != 2:
+                print("usage: !!load <filename>")
+                continue
+            else:
+                filename = args[1]
+
+            # Check if file exists and add .json if needed
+            if not os.path.exists(filename):
+                if (not filename.endswith(".json")) and os.path.exists(
+                    filename + ".json"
+                ):
+                    filename += ".json"
+                else:
+                    print("file not found:", filename)
+                    continue
+
+            print("loading...", filename)
+            with open(filename, "r") as infile:
+                new_conv = json.load(infile)
+
+            conv = get_conv_template(new_conv["template_name"])
+            conv.set_system_message(new_conv["system_message"])
+            conv.messages = new_conv["messages"]
+            for message in conv.messages[conv.offset :]:
+                chatio.prompt_for_output(message[0])
+                chatio.print_output(message[1])
+            continue
 
         conv.append_message(conv.roles[0], inp)
         conv.append_message(conv.roles[1], None)
+        prompt = conv.get_prompt()
 
-        if is_chatglm:
-            generate_stream_func = chatglm_generate_stream
-            prompt = conv.messages[conv.offset:]
-        else:
-            generate_stream_func = generate_stream
-            prompt = conv.get_prompt()
+        if is_codet5p:  # codet5p is a code completion model.
+            prompt = inp
 
         gen_params = {
             "model": model_path,
             "prompt": prompt,
             "temperature": temperature,
+            "repetition_penalty": repetition_penalty,
             "max_new_tokens": max_new_tokens,
             "stop": conv.stop_str,
             "stop_token_ids": conv.stop_token_ids,
@@ -331,41 +418,25 @@ def chat_loop(
         }
 
         chatio.prompt_for_output(conv.roles[1])
-        output_stream = generate_stream_func(model, tokenizer, gen_params, device)
+        output_stream = generate_stream_func(
+            model,
+            tokenizer,
+            gen_params,
+            device,
+            context_len=context_len,
+            judge_sent_end=judge_sent_end,
+        )
+        t = time.time()
         outputs = chatio.stream_output(output_stream)
-        # NOTE: strip is important to align with the training data.
-        conv.messages[-1][-1] = outputs.strip()
+        duration = time.time() - t
+        conv.update_last_message(outputs.strip())
 
         if debug:
-            print("\n", {"prompt": prompt, "outputs": outputs}, "\n")
-
-
-def add_model_args(parser):
-    parser.add_argument(
-        "--model-path",
-        type=str,
-        default="lmsys/fastchat-t5-3b-v1.0",
-        help="The path to the weights. This can be a local folder or a Hugging Face repo ID.",
-    )
-    parser.add_argument(
-        "--device", type=str, choices=["cpu", "cuda", "mps"], default="cuda",
-        help="The device type"
-    )
-    parser.add_argument(
-        "--gpus",
-        type=str,
-        default=None,
-        help="A single GPU like 1 or multiple GPUs like 0,2"
-    )
-    parser.add_argument("--num-gpus", type=int, default=1)
-    parser.add_argument(
-        "--max-gpu-memory",
-        type=str,
-        help="The maximum memory per gpu. Use a string like '13Gib'",
-    )
-    parser.add_argument(
-        "--load-8bit", action="store_true", help="Use 8-bit quantization"
-    )
-    parser.add_argument(
-        "--cpu-offloading", action="store_true", help="Only when using 8-bit quantization: Offload excess weights to the CPU that don't fit on the GPU"
-    )
+            num_tokens = len(tokenizer.encode(outputs))
+            msg = {
+                "conv_template": conv.name,
+                "prompt": prompt,
+                "outputs": outputs,
+                "speed (token/s)": round(num_tokens / duration, 2),
+            }
+            print(f"\n{msg}\n")
