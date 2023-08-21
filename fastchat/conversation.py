@@ -144,7 +144,7 @@ class Conversation:
             for i, (role, message) in enumerate(self.messages):
                 if message:
                     if i == 0:
-                        ret += system_prompt + message
+                        ret += system_prompt + message + " "
                     else:
                         ret += role + " " + message + seps[i % 2]
                 else:
@@ -838,10 +838,11 @@ register_conv_template(
 )
 
 # StarChat template
+# reference: https://huggingface.co/spaces/HuggingFaceH4/starchat-playground/blob/main/dialogues.py
 register_conv_template(
     Conversation(
         name="starchat",
-        system_template="<system>{system_message}\n",
+        system_template="<system>\n{system_message}",
         roles=("<|user|>", "<|assistant|>"),
         messages=(),
         offset=0,
@@ -854,17 +855,17 @@ register_conv_template(
 
 # Baichuan-13B-Chat template
 register_conv_template(
-    # source: https://huggingface.co/baichuan-inc/Baichuan-13B-Chat/blob/f5f47be2adbbdceb784f334d6fa1ca2c73e65097/modeling_baichuan.py#L507
+    # source: https://huggingface.co/baichuan-inc/Baichuan-13B-Chat/blob/19ef51ba5bad8935b03acd20ff04a269210983bc/modeling_baichuan.py#L555
     # https://huggingface.co/baichuan-inc/Baichuan-13B-Chat/blob/main/generation_config.json
+    # https://github.com/baichuan-inc/Baichuan-13B/issues/25
     Conversation(
         name="baichuan-chat",
-        roles=(" <reserved_102> ", " <reserved_103> "),
+        roles=("<reserved_102>", "<reserved_103>"),
         messages=(),
         offset=0,
-        sep_style=SeparatorStyle.NO_COLON_TWO,
+        sep_style=SeparatorStyle.NO_COLON_SINGLE,
         sep="",
-        sep2="</s>",
-        stop_token_ids=[2, 195],
+        stop_token_ids=[],
     )
 )
 
@@ -920,6 +921,79 @@ register_conv_template(
     )
 )
 
+
+# Qwen-chat default template
+# source: https://huggingface.co/Qwen/Qwen-7B-Chat/blob/main/qwen_generation_utils.py#L130
+register_conv_template(
+    Conversation(
+        name="qwen-7b-chat",
+        system_template="<|im_start|>system\n{system_message}",
+        system_message="You are a helpful assistant.",
+        roles=("<|im_start|>user", "<|im_start|>assistant"),
+        messages=(),
+        offset=0,
+        sep_style=SeparatorStyle.CHATML,
+        sep="<|im_end|>",
+        stop_token_ids=[
+            151643,
+            151644,
+            151645,
+        ],  # "<|endoftext|>", "<|im_start|>", "<|im_end|>"
+        stop_str="<|endoftext|>",
+    )
+)
+
+
+# AquilaChat default template
+# source: https://github.com/FlagAI-Open/FlagAI/blob/master/examples/Aquila/Aquila-chat/cyg_conversation.py
+register_conv_template(
+    Conversation(
+        name="aquila-chat",
+        system_message="A chat between a curious human and an artificial intelligence assistant. "
+        "The assistant gives helpful, detailed, and polite answers to the human's questions.",
+        roles=("Human", "Assistant", "System"),
+        messages=(),
+        offset=0,
+        sep_style=SeparatorStyle.ADD_COLON_SINGLE,
+        sep="###",
+        sep2="",
+        stop_str=["###", "</s>", "[UNK]"],
+    )
+)
+
+# Llama2-Chinese default template
+# source: https://huggingface.co/FlagAlpha
+register_conv_template(
+    Conversation(
+        name="llama2-chinese",
+        system_message="<s>{system_message}</s>",
+        roles=("Human", "Assistant", "System"),
+        messages=(),
+        offset=0,
+        sep_style=SeparatorStyle.ADD_COLON_TWO,
+        sep="\n",
+        sep2="\n</s><s>",
+        stop_str="</s>",
+    )
+)
+
+# Vigogne Chat default template
+# source: https://github.com/bofenghuang/vigogne
+register_conv_template(
+    Conversation(
+        name="vigogne-chat",
+        system_template="<|system|>: {system_message}",
+        system_message="Vous êtes l'assistant IA nommé Vigogne, créé par Zaion Lab (https://zaion.ai). "
+        "Vous suivez extrêmement bien les instructions. Aidez autant que vous le pouvez.",
+        roles=("<|user|>", "<|assistant|>"),
+        messages=(),
+        offset=0,
+        sep_style=SeparatorStyle.ADD_COLON_TWO,
+        sep="\n",
+        sep2="</s>\n",
+        stop_str="<|user|>",
+    )
+)
 
 if __name__ == "__main__":
     print("Vicuna template:")
