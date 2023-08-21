@@ -12,7 +12,8 @@ torch.set_printoptions(threshold=np.inf)
 import transformers
 from transformers.trainer_pt_utils import LabelSmoother
 
-from fastchat.conversation import get_default_conv_template, SeparatorStyle
+from fastchat.model.model_adapter import get_conversation_template
+from fastchat.conversation import SeparatorStyle
 
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index
 
@@ -20,7 +21,7 @@ def preprocess(
     sources,
     tokenizer: transformers.PreTrainedTokenizer,
 ) -> Dict:
-    conv = get_default_conv_template("ziya_13b").copy()
+    conv = get_conversation_template("ziya_13b")
     roles = {"human": conv.roles[0], "gpt": conv.roles[1]}
 
     # Apply prompt templates
@@ -58,44 +59,40 @@ def preprocess(
     assert conv.sep_style == SeparatorStyle.ADD_COLON_TWO \
         or conv.sep_style == SeparatorStyle.ZIYA
 
-    # Mask targets
+    # Mask targets. Only compute loss on the assistant outputs.
     sep = conv.sep + conv.roles[1] + ": "
     for conversation, target in zip(conversations, targets):
         total_len = int(target.ne(tokenizer.pad_token_id).sum())
 
-        rounds = conversation.split(conv.sep2)
+        turns = conversation.split(conv.sep2)
         cur_len = 1
         target[:cur_len] = IGNORE_TOKEN_ID
-        for i, rou in enumerate(rounds):
-            if rou == "":
+        for i, turn in enumerate(turns):
+            if turn == "":
                 break
+            turn_len = len(tokenizer(turn).input_ids)
 
-            parts = rou.split(sep)
+            parts = turn.split(sep)
             if len(parts) != 2:
                 break
             parts[0] += sep
-            round_len = len(tokenizer(rou).input_ids)
+            # "-2" is hardcoded for the LLaMA tokenizer to make the offset correct.
             instruction_len = len(tokenizer(parts[0]).input_ids) - 2
 
-            target[cur_len:cur_len+instruction_len] = (
-                IGNORE_TOKEN_ID)
+            # Ignore the user instructions
+            target[cur_len : cur_len + instruction_len] = IGNORE_TOKEN_ID
+            cur_len += turn_len
 
-            cur_len += round_len
         target[cur_len:] = IGNORE_TOKEN_ID
 
-        if False:
+        if True:  # Inspect and check the correctness of masking
             z = target.clone()
             z = torch.where(z == IGNORE_TOKEN_ID, tokenizer.unk_token_id, z)
-            rank0_print(tokenizer.decode(z))
+            print(tokenizer.decode(z))
 
         if cur_len < tokenizer.model_max_length:
             if cur_len != total_len:
                 target[:] = IGNORE_TOKEN_ID
-                z = target.clone()
-                z = torch.where(z == IGNORE_TOKEN_ID, tokenizer.unk_token_id, z)
-                # print(tokenizer.deocde(z))
-                # print(tokenizer("<s>中国</s>").input_ids)
-                print(tokenizer.encode("中国"))
                 print(
                     f"WARNING: tokenization mismatch: {cur_len} vs. {total_len}."
                     f" (ignored)"
@@ -106,6 +103,7 @@ def preprocess(
         labels=targets,
         attention_mask=input_ids.ne(tokenizer.pad_token_id),
     )
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

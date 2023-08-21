@@ -78,7 +78,7 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer, output_dir: st
 
 
 def apply_prompt_template(sources, systems=None):
-    conv = get_conversation_template("vicuna")
+    conv = get_conversation_template("ziya_13b")
     roles = {"human": conv.roles[0], "gpt": conv.roles[1]}
     conversations = []
     for i, source in enumerate(sources):
@@ -262,7 +262,7 @@ def make_supervised_data_module(
         eval_indices = perm[split:]
     else:
         # if train_ratio==1, we use 5% of data as eval data, make sure trainer will not throw error when eval data is empty
-        eval_indices = perm[-int(len(perm) * 0.05) :]
+        eval_indices = perm[-int(len(perm) * 0.01) :]
     train_raw_data = [raw_data[i] for i in train_indices]
     eval_raw_data = [raw_data[i] for i in eval_indices]
     rank0_print(f"#train {len(train_raw_data)}, #eval {len(eval_raw_data)}")

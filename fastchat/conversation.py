@@ -521,7 +521,7 @@ register_conv_template(
 register_conv_template(
     Conversation(
         name="starcoder",
-        system="Below is a dialogue between a human user and an AI assistant. The assistant is happy to help with almost anything, and will do its best to understand exactly what is needed.",
+        system_message="Below is a dialogue between a human user and an AI assistant. The assistant is happy to help with almost anything, and will do its best to understand exactly what is needed.",
         roles=("user", "assistant"),
         messages=(),
         offset=0,
@@ -533,7 +533,7 @@ register_conv_template(
 register_conv_template(
     Conversation(
         name="ziya_13b",
-        system="",
+        system_message="",
         roles=("<human>", "<bot>"),
         messages=(),
         offset=0,
@@ -934,6 +934,15 @@ if __name__ == "__main__":
 
     print("Llama-2 template:")
     conv = get_conv_template("llama-2")
+    conv.set_system_message("You are a helpful, respectful and honest assistant.")
+    conv.append_message(conv.roles[0], "Hello!")
+    conv.append_message(conv.roles[1], "Hi!")
+    conv.append_message(conv.roles[0], "How are you?")
+    conv.append_message(conv.roles[1], "Fine.")
+    print(conv.get_prompt())
+
+    print("Baichuan template:")
+    conv = get_conv_template("baichuan-chat")
     conv.set_system_message("You are a helpful, respectful and honest assistant.")
     conv.append_message(conv.roles[0], "Hello!")
     conv.append_message(conv.roles[1], "Hi!")

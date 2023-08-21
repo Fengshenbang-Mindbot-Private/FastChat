@@ -17,6 +17,7 @@
 from dataclasses import dataclass, field
 import json
 import math
+import random
 import pathlib
 from typing import Dict, Optional, Sequence
 
@@ -242,6 +243,7 @@ def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer,
     rank0_print("Loading data...")
 
     train_json = json.load(open(data_args.data_path, "r"))
+    random.shuffle(train_json)
     train_dataset = dataset_cls(train_json, tokenizer=tokenizer)
 
     if data_args.eval_data_path:

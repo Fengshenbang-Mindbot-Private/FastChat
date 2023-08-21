@@ -24,18 +24,18 @@ WANDB_PROJECT="FastChat"
 export WANDB_PROJECT
 
 torchrun --nproc_per_node=$GPUS_PER_NODE --master_addr=$MASTER_ADDR --master_port=$MASTER_PORT train.py \
-    --model_name_or_path "/cognitive_comp/pankunhao/code/FastChat/model_ckpt/general_0625/checkpoint-4166" \
+    --model_name_or_path "/cognitive_comp/pankunhao/code/FastChat/model_ckpt/general_0808" \
     --data_path /cognitive_comp/pankunhao/data/writing/sft_data/merged.json \
     --bf16 True \
-    --output_dir /cognitive_comp/pankunhao/code/FastChat/model_ckpt/writing_0804 \
-    --num_train_epochs 10 \
+    --output_dir /cognitive_comp/pankunhao/code/FastChat/model_ckpt/writing_0812 \
+    --num_train_epochs 5 \
     --per_device_train_batch_size 2 \
     --per_device_eval_batch_size 2 \
-    --gradient_accumulation_steps 8 \
+    --gradient_accumulation_steps 2 \
     --evaluation_strategy "no" \
     --save_strategy "epoch" \
-    --save_total_limit 7 \
-    --learning_rate 8e-6 \
+    --save_total_limit 5 \
+    --learning_rate 4e-6 \
     --weight_decay 0. \
     --warmup_ratio 0.1 \
     --lr_scheduler_type "cosine" \
