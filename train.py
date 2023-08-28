@@ -55,7 +55,8 @@ class DataArguments:
         default=None, metadata={"help": "Path to the training data."}
     )
     eval_data_path: str = field(
-        default=None, metadata={"help": "Path to the evaluation data."}
+        default=None, metadata={"help": "Path to the evaluation data.", "nargs": "*"}
+        # default=None, metadata={"help": "Path to the evaluation data."}
     )
     lazy_preprocess: bool = False
 
@@ -247,8 +248,16 @@ def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer,
     train_dataset = dataset_cls(train_json, tokenizer=tokenizer)
 
     if data_args.eval_data_path:
-        eval_json = json.load(open(data_args.eval_data_path, "r"))
-        eval_dataset = dataset_cls(eval_json, tokenizer=tokenizer)
+        
+        from pathlib import Path
+        eval_dataset = {}
+        for eval_data_path in data_args.eval_data_path:
+            dataset_name = Path(eval_data_path).stem
+            rank0_print(f"Loading {dataset_name} eval data...")
+            eval_json = json.load(open(eval_data_path, "r"))
+            eval_dataset[dataset_name] = SupervisedDataset(eval_json, tokenizer=tokenizer)
+        
+        # eval_dataset = dataset_cls(train_json, tokenizer=tokenizer)
     else:
         eval_dataset = None
 
