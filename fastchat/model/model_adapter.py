@@ -862,6 +862,23 @@ class PhoenixAdapter(BaseModelAdapter):
         return get_conv_template("phoenix")
 
 
+class ReaLMAdapter(BaseModelAdapter):
+    """The model adapter for FreedomIntelligence/ReaLM-7b"""
+
+    def match(self, model_path: str):
+        return "ReaLM" in model_path
+
+    def load_model(self, model_path: str, from_pretrained_kwargs: dict):
+        tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True)
+        model = AutoModelForCausalLM.from_pretrained(
+            model_path, low_cpu_mem_usage=True, **from_pretrained_kwargs
+        )
+        return model, tokenizer
+
+    def get_default_conv_template(self, model_path: str) -> Conversation:
+        return get_conv_template("ReaLM-7b-v1")
+
+
 class ChatGPTAdapter(BaseModelAdapter):
     """The model adapter for ChatGPT"""
 
@@ -991,7 +1008,7 @@ class WizardLMAdapter(BaseModelAdapter):
 
     def get_default_conv_template(self, model_path: str) -> Conversation:
         model_path = model_path.lower()
-        if "13b" in model_path or "30b" in model_path:
+        if "13b" in model_path or "30b" in model_path or "70b" in model_path:
             return get_conv_template("vicuna_v1.1")
         else:
             # TODO: use the recommended template for 7B
@@ -1514,6 +1531,36 @@ class VigogneChatAdapter(BaseModelAdapter):
         return get_conv_template("vigogne-chat")
 
 
+class OpenLLaMaOpenInstructAdapter(BaseModelAdapter):
+    """The model adapter for OpenLLaMa-Open-Instruct"""
+
+    use_fast_tokenizer = False
+
+    def match(self, model_path: str):
+        return (
+            "open-llama" in model_path.lower() and "open-instruct" in model_path.lower()
+        )
+
+    def load_model(self, model_path: str, from_pretrained_kwargs: dict):
+        revision = from_pretrained_kwargs.get("revision", "main")
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_path,
+            use_fast=self.use_fast_tokenizer,
+            trust_remote_code=True,
+            revision=revision,
+        )
+        model = AutoModelForCausalLM.from_pretrained(
+            model_path,
+            trust_remote_code=True,
+            low_cpu_mem_usage=True,
+            **from_pretrained_kwargs,
+        ).eval()
+        return model, tokenizer
+
+    def get_default_conv_template(self, model_path: str) -> Conversation:
+        return get_conv_template("alpaca")
+
+
 # Note: the registration order matters.
 # The one registered earlier has a higher matching priority.
 register_model_adapter(PeftModelAdapter)
@@ -1568,6 +1615,8 @@ register_model_adapter(E5Adapter)
 register_model_adapter(Lamma2ChineseAdapter)
 register_model_adapter(VigogneInstructAdapter)
 register_model_adapter(VigogneChatAdapter)
+register_model_adapter(OpenLLaMaOpenInstructAdapter)
+register_model_adapter(ReaLMAdapter)
 
 # After all adapters, try the default base adapter.
 register_model_adapter(BaseModelAdapter)
