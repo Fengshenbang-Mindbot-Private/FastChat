@@ -1,19 +1,14 @@
 #encoding=utf8
 
-import argparse
-import copy
-from dataclasses import dataclass, field
-import json
-import pathlib
 from typing import Dict, Optional, Sequence
-import numpy as np
 import torch
-torch.set_printoptions(threshold=np.inf)
+from torch.utils.data import Dataset
 import transformers
 from transformers.trainer_pt_utils import LabelSmoother
 
-from fastchat.model.model_adapter import get_conversation_template
+from fastchat.utils import rank0_print
 from fastchat.conversation import SeparatorStyle
+from fastchat.model.model_adapter import get_conversation_template
 
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index
 
@@ -61,7 +56,7 @@ def preprocess(
 
     # Mask targets. Only compute loss on the assistant outputs.
     sep = conv.sep + conv.roles[1] + ": "
-    for conversation, target in zip(conversations, targets):
+    for idx, (conversation, target) in enumerate(zip(conversations, targets)):
         total_len = int(target.ne(tokenizer.pad_token_id).sum())
 
         turns = conversation.split(conv.sep2)
@@ -85,15 +80,19 @@ def preprocess(
 
         target[cur_len:] = IGNORE_TOKEN_ID
 
-        if True:  # Inspect and check the correctness of masking
+        if False:  # Inspect and check the correctness of masking
+            torch.set_printoptions(threshold=10000)
             z = target.clone()
             z = torch.where(z == IGNORE_TOKEN_ID, tokenizer.unk_token_id, z)
-            print(tokenizer.decode(z))
+            rank0_print("readable target:", tokenizer.decode(z))
+            rank0_print("conversation:", conversation)
+            rank0_print("input_ids:", input_ids[idx])
+            rank0_print("target:", target)
 
         if cur_len < tokenizer.model_max_length:
             if cur_len != total_len:
                 target[:] = IGNORE_TOKEN_ID
-                print(
+                rank0_print(
                     f"WARNING: tokenization mismatch: {cur_len} vs. {total_len}."
                     f" (ignored)"
                 )
@@ -104,26 +103,55 @@ def preprocess(
         attention_mask=input_ids.ne(tokenizer.pad_token_id),
     )
 
+class SupervisedDataset(Dataset):
+    """Dataset for supervised fine-tuning."""
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model_path", type=str, required=True)
-    parser.add_argument("--input_file", type=str, required=True)
-    args = parser.parse_args()
+    def __init__(self, raw_data, tokenizer: transformers.PreTrainedTokenizer):
+        super(SupervisedDataset, self).__init__()
 
-    tokenizer = transformers.AutoTokenizer.from_pretrained(
-        args.model_path,
-        model_max_length=2048,
-        padding_side="right",
-        use_fast=False,
-        trust_remote_code=True,
-    )
-    tokenizer.bos_token = "<s>"
-    tokenizer.eos_token = "</s>"
-    tokenizer.pad_token = tokenizer.unk_token
+        rank0_print("Formatting inputs...")
+        sources = [example["conversations"] for example in raw_data]
+        data_dict = preprocess(sources, tokenizer)
 
-    raw_data = json.load(open(args.input_file, "r"))
-    print("load %d raw data" % len(raw_data))
-    sources = [example["conversations"] for example in raw_data]
-    sources = sources[:10]
-    data_dict = preprocess(sources, tokenizer)
+        self.input_ids = data_dict["input_ids"]
+        self.labels = data_dict["labels"]
+        self.attention_mask = data_dict["attention_mask"]
+
+    def __len__(self):
+        return len(self.input_ids)
+
+    def __getitem__(self, i) -> Dict[str, torch.Tensor]:
+        return dict(input_ids=self.input_ids[i],
+                    labels=self.labels[i],
+                    attention_mask=self.attention_mask[i])
+
+
+class LazySupervisedDataset(Dataset):
+    """Dataset for supervised fine-tuning."""
+
+    def __init__(self, raw_data, tokenizer: transformers.PreTrainedTokenizer):
+        super(LazySupervisedDataset, self).__init__()
+        self.tokenizer = tokenizer
+
+        rank0_print("Formatting inputs...Skip in lazy mode")
+        self.tokenizer = tokenizer
+        self.raw_data = raw_data
+        self.cached_data_dict = {}
+
+    def __len__(self):
+        return len(self.raw_data)
+
+    def __getitem__(self, i) -> Dict[str, torch.Tensor]:
+        if i in self.cached_data_dict:
+            return self.cached_data_dict[i]
+
+        ret = preprocess([self.raw_data[i]["conversations"]], self.tokenizer)
+        ret = dict(
+            input_ids=ret["input_ids"][0],
+            labels=ret["labels"][0],
+            attention_mask=ret["attention_mask"][0],
+        )
+        self.cached_data_dict[i] = ret
+
+        return ret
+

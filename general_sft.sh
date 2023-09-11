@@ -26,10 +26,11 @@ export WANDB_PROJECT
 export LAUNCHER="torchrun --nnodes=$NNODES --nproc_per_node=$GPUS_PER_NODE --master_addr=$MASTER_ADDR --master_port=$MASTER_PORT"
 
 export CMD=" train.py \
-    --model_name_or_path /cognitive_comp/pankunhao/pretrained/Ziya-LLaMa2-13B-step60000 \
-    --data_path /cognitive_comp/pankunhao/data/writing/general_sft_data/merged.json \
+    --model_name_or_path /cognitive_comp/pankunhao/pretrained/Ziya-LLaMa2-13B-step115000 \
+    --data_path /cognitive_comp/pankunhao/data/writing/general_sft_data/train.json \
+    --eval_data_path /cognitive_comp/pankunhao/data/writing/general_sft_data/eval.json \
     --bf16 True \
-    --output_dir /cognitive_comp/pankunhao/code/FastChat/model_ckpt/general_0808 \
+    --output_dir /cognitive_comp/pankunhao/code/FastChat/model_ckpt/general_0906 \
     --num_train_epochs 3 \
     --per_device_train_batch_size 8 \
     --per_device_eval_batch_size 8 \
@@ -39,7 +40,7 @@ export CMD=" train.py \
     --save_total_limit 3 \
     --learning_rate 1e-5 \
     --weight_decay 0. \
-    --warmup_ratio 0.10 \
+    --warmup_ratio 0.15 \
     --lr_scheduler_type cosine \
     --logging_steps 1 \
     --deepspeed "ds_config.json" \

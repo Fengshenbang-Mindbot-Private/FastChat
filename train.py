@@ -24,24 +24,19 @@ from typing import Dict, Optional, Sequence
 # Make it more memory efficient by monkey patching the LLaMA model with FlashAttn.
 
 # Need to call this before importing transformers.
-from fastchat.train.llama_flash_attn_monkey_patch import (
+from fastchat.train.llama2_flash_attn_monkey_patch import (
     replace_llama_attn_with_flash_attn,
 )
 
 replace_llama_attn_with_flash_attn()
 
-import numpy as np
 import torch
-from torch.utils.data import Dataset
 import transformers
 from transformers import Trainer
-from transformers.trainer_pt_utils import LabelSmoother
 import wandb
 
-from fastchat.conversation import SeparatorStyle
-from fastchat.model.model_adapter import get_conversation_template
-
-IGNORE_TOKEN_ID = LabelSmoother.ignore_index
+from fastchat.utils import rank0_print
+from fastchat.data.sft_dataset import SupervisedDataset, LazySupervisedDataset
 
 
 @dataclass
@@ -72,16 +67,11 @@ class TrainingArguments(transformers.TrainingArguments):
             "Maximum sequence length. Sequences will be right padded (and possibly truncated)."
         },
     )
+    use_position_interpolation: Optional[bool] = field(default=False)
     report_to: str = field(default="wandb")
 
 
 local_rank = None
-
-
-def rank0_print(*args):
-    if local_rank == 0:
-        print(*args)
-
 
 def safe_save_model_for_hf_trainer(trainer: transformers.Trainer,
                                    output_dir: str):
@@ -94,145 +84,6 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer,
         }
         del state_dict
         trainer._save(output_dir, state_dict=cpu_state_dict)  # noqa
-
-def preprocess(
-    sources,
-    tokenizer: transformers.PreTrainedTokenizer,
-) -> Dict:
-    conv = get_conversation_template("ziya_13b")
-    roles = {"human": conv.roles[0], "gpt": conv.roles[1]}
-
-    # Apply prompt templates
-    conversations = []
-    for i, source in enumerate(sources):
-        if roles[source[0]["from"]] != conv.roles[0]:
-            # Skip the first one if it is not from human
-            source = source[1:]
-
-        checking_flag = True
-
-        conv.messages = []
-        for j, sentence in enumerate(source):
-            role = roles[sentence["from"]]
-            if role != conv.roles[j % 2]:
-                print("error source:")
-                print(source)
-                checking_flag = False
-                break
-            conv.append_message(role, sentence["value"])
-        
-        if checking_flag:
-            conversations.append(conv.get_prompt())
-
-    # Tokenize conversations
-    input_ids = tokenizer(
-        conversations,
-        return_tensors="pt",
-        padding="max_length",
-        max_length=tokenizer.model_max_length,
-        truncation=True,
-    ).input_ids
-    targets = input_ids.clone()
-
-    assert conv.sep_style == SeparatorStyle.ADD_COLON_TWO \
-        or conv.sep_style == SeparatorStyle.ZIYA
-
-    # Mask targets. Only compute loss on the assistant outputs.
-    sep = conv.sep + conv.roles[1] + ": "
-    for conversation, target in zip(conversations, targets):
-        total_len = int(target.ne(tokenizer.pad_token_id).sum())
-
-        turns = conversation.split(conv.sep2)
-        cur_len = 1
-        target[:cur_len] = IGNORE_TOKEN_ID
-        for i, turn in enumerate(turns):
-            if turn == "":
-                break
-            turn_len = len(tokenizer(turn).input_ids)
-
-            parts = turn.split(sep)
-            if len(parts) != 2:
-                break
-            parts[0] += sep
-            # "-2" is hardcoded for the LLaMA tokenizer to make the offset correct.
-            instruction_len = len(tokenizer(parts[0]).input_ids) - 2
-
-            # Ignore the user instructions
-            target[cur_len : cur_len + instruction_len] = IGNORE_TOKEN_ID
-            cur_len += turn_len
-
-        target[cur_len:] = IGNORE_TOKEN_ID
-
-        if False:  # Inspect and check the correctness of masking
-            z = target.clone()
-            z = torch.where(z == IGNORE_TOKEN_ID, tokenizer.unk_token_id, z)
-            rank0_print(tokenizer.decode(z))
-
-        if cur_len < tokenizer.model_max_length:
-            if cur_len != total_len:
-                target[:] = IGNORE_TOKEN_ID
-                rank0_print(
-                    f"WARNING: tokenization mismatch: {cur_len} vs. {total_len}."
-                    f" (ignored)"
-                )
-
-    return dict(
-        input_ids=input_ids,
-        labels=targets,
-        attention_mask=input_ids.ne(tokenizer.pad_token_id),
-    )
-
-class SupervisedDataset(Dataset):
-    """Dataset for supervised fine-tuning."""
-
-    def __init__(self, raw_data, tokenizer: transformers.PreTrainedTokenizer):
-        super(SupervisedDataset, self).__init__()
-
-        rank0_print("Formatting inputs...")
-        sources = [example["conversations"] for example in raw_data]
-        data_dict = preprocess(sources, tokenizer)
-
-        self.input_ids = data_dict["input_ids"]
-        self.labels = data_dict["labels"]
-        self.attention_mask = data_dict["attention_mask"]
-
-    def __len__(self):
-        return len(self.input_ids)
-
-    def __getitem__(self, i) -> Dict[str, torch.Tensor]:
-        return dict(input_ids=self.input_ids[i],
-                    labels=self.labels[i],
-                    attention_mask=self.attention_mask[i])
-
-
-class LazySupervisedDataset(Dataset):
-    """Dataset for supervised fine-tuning."""
-
-    def __init__(self, raw_data, tokenizer: transformers.PreTrainedTokenizer):
-        super(LazySupervisedDataset, self).__init__()
-        self.tokenizer = tokenizer
-
-        rank0_print("Formatting inputs...Skip in lazy mode")
-        self.tokenizer = tokenizer
-        self.raw_data = raw_data
-        self.cached_data_dict = {}
-
-    def __len__(self):
-        return len(self.raw_data)
-
-    def __getitem__(self, i) -> Dict[str, torch.Tensor]:
-        if i in self.cached_data_dict:
-            return self.cached_data_dict[i]
-
-        ret = preprocess([self.raw_data[i]["conversations"]], self.tokenizer)
-        ret = dict(
-            input_ids=ret["input_ids"][0],
-            labels=ret["labels"][0],
-            attention_mask=ret["attention_mask"][0],
-        )
-        self.cached_data_dict[i] = ret
-
-        return ret
 
 
 def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer,
@@ -272,16 +123,18 @@ def train():
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
     local_rank = training_args.local_rank
 
-    # Set RoPE scaling factor
     config = transformers.AutoConfig.from_pretrained(
         model_args.model_name_or_path,
         cache_dir=training_args.cache_dir,
     )
-    orig_ctx_len = getattr(config, "max_position_embeddings", None)
-    if orig_ctx_len and training_args.model_max_length > orig_ctx_len:
-        scaling_factor = float(math.ceil(training_args.model_max_length / orig_ctx_len))
-        config.rope_scaling = {"type": "linear", "factor": scaling_factor}
     config.use_cache = False
+
+    # Set RoPE scaling factor
+    if training_args.use_position_interpolation:
+        orig_ctx_len = getattr(config, "max_position_embeddings", None)
+        if orig_ctx_len and training_args.model_max_length > orig_ctx_len:
+            scaling_factor = float(math.ceil(training_args.model_max_length / orig_ctx_len))
+            config.rope_scaling = {"type": "linear", "factor": scaling_factor}
 
     # Load model and tokenizer
     model = transformers.AutoModelForCausalLM.from_pretrained(
@@ -298,22 +151,11 @@ def train():
         use_fast=False,
         trust_remote_code=True,
     )
-    
-    DEFAULT_PAD_TOKEN = "[PAD]"
-    DEFAULT_EOS_TOKEN = "</s>"
-    DEFAULT_BOS_TOKEN = "</s>"
-    DEFAULT_UNK_TOKEN = "</s>"
-    """
-    model_path = str(model_args.model_name_or_path)
-    if "llama" in model_path.lower():
-        tokenizer.add_special_tokens(
-            {
-                "eos_token": DEFAULT_EOS_TOKEN,
-                "bos_token": DEFAULT_BOS_TOKEN,
-                "unk_token": DEFAULT_UNK_TOKEN,
-            }
-        )
-    """
+
+    from tokenizers import AddedToken
+    human = AddedToken("<human>",lstrip=False,rstrip=False,single_word=False,normalized=True)
+    bot = AddedToken("<bot>",lstrip=False,rstrip=False,single_word=False,normalized=True)
+    tokenizer.add_special_tokens({"additional_special_tokens": [human, bot]})
     tokenizer.pad_token = tokenizer.unk_token
 
     # Load data
@@ -328,7 +170,9 @@ def train():
         trainer.train(resume_from_checkpoint=True)
     else:
         trainer.train()
+    
     model.config.use_cache = True
+    
     trainer.save_state()
     safe_save_model_for_hf_trainer(trainer=trainer,
                                    output_dir=training_args.output_dir)

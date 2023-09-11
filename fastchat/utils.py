@@ -10,7 +10,7 @@ import platform
 import sys
 from typing import AsyncGenerator, Generator
 import warnings
-
+import torch.distributed as dist
 import requests
 
 from fastchat.constants import LOGDIR
@@ -300,3 +300,13 @@ def get_context_length(config):
         if val is not None:
             return int(rope_scaling_factor * val)
     return 2048
+
+def is_rank_0() -> bool:
+    return not dist.is_initialized() or dist.get_rank() == 0
+
+def rank0_print(*args):
+    """If distributed is initialized print only on rank 0."""
+    if is_rank_0():
+        print(*args, flush=True)      
+    pass
+
