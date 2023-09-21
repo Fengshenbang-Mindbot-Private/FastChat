@@ -9,6 +9,7 @@ import argparse
 import json
 import numpy as np
 import torch
+import random
 torch.set_printoptions(threshold=np.inf)
 import transformers
 
@@ -36,5 +37,6 @@ if __name__ == "__main__":
         data = json.loads(line.strip())
         sources.append(data)
     print("load %d raw data" % len(sources))
-    sources = sources[:5]
+    random.shuffle(sources)
+    sources = sources[:1]
     data_dict = preprocess(sources, tokenizer)

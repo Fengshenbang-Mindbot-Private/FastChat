@@ -20,30 +20,30 @@ GPUS_PER_NODE=8
 MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
 MASTER_PORT=$(shuf -n 1 -i 40000-65535)
 
-WANDB_PROJECT="FastChat"
+WANDB_PROJECT="RRHF"
 export WANDB_PROJECT
 
 torchrun --nproc_per_node=$GPUS_PER_NODE --master_addr=$MASTER_ADDR --master_port=$MASTER_PORT train_rrhf.py \
-    --model_name_or_path "/cognitive_comp/pankunhao/code/FastChat/model_ckpt/general_0906" \
-    --data_path /cognitive_comp/pankunhao/data/writing/rank_data/docs_qq_gpt35_reward_0821.jsonl \
-    --eval_data_path /cognitive_comp/pankunhao/data/writing/rank_data/docs_qq_gpt35_reward_0821.jsonl \
+    --model_name_or_path "/cognitive_comp/pankunhao/code/FastChat/model_ckpt/writing_0909/checkpoint-552" \
+    --data_path /cognitive_comp/pankunhao/data/writing/rank_data/train_reward_short_revised.json \
+    --eval_data_path /cognitive_comp/pankunhao/data/writing/rank_data/eval_reward_short_revised.json \
     --bf16 True \
-    --output_dir /cognitive_comp/pankunhao/code/FastChat/model_ckpt/writing_0905 \
-    --num_train_epochs 10 \
+    --output_dir /cognitive_comp/pankunhao/code/FastChat/model_ckpt/rrhf_0922 \
+    --num_train_epochs 4 \
     --per_device_train_batch_size 1 \
     --per_device_eval_batch_size 1 \
-    --gradient_accumulation_steps 1 \
+    --gradient_accumulation_steps 8 \
     --evaluation_strategy "epoch" \
     --save_strategy "epoch" \
-    --save_total_limit 7 \
-    --learning_rate 4e-6 \
+    --save_total_limit 4 \
+    --learning_rate 1e-6 \
     --weight_decay 0. \
     --warmup_ratio 0.1 \
     --lr_scheduler_type "cosine" \
     --logging_steps 1 \
-    --deepspeed "ds_config.json" \
+    --deepspeed "ds_config_stage3.json" \
     --tf32 True \
-    --model_max_length 4096 \
+    --model_max_length 8192 \
     --gradient_checkpointing True \
     --lazy_preprocess True \
     --rrhf_weight 1.0 

@@ -33,7 +33,7 @@ from transformers import Trainer
 from transformers import DefaultDataCollator
 from transformers.trainer_pt_utils import LabelSmoother
 
-from fastchat.utils import rank0_print
+from fastchat.utils import rank0_print, is_rank_0
 from fastchat.data.rrhf_dataset import RRHFDataset, LazyRRHFDataset
 
 local_rank = None
@@ -127,7 +127,7 @@ def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer,
             eval_json = []
             for line in open(eval_data_path):
                 eval_json.append(json.loads(line))
-            eval_dataset[dataset_name] = RRHFDataset(eval_json, tokenizer=tokenizer)
+            eval_dataset[dataset_name] = dataset_cls(eval_json, tokenizer=tokenizer)
         
         # eval_dataset = dataset_cls(train_json, tokenizer=tokenizer)
     else:
@@ -142,8 +142,9 @@ class RRHFTrainer(Trainer):
 
         mask = (labels != LabelSmoother.ignore_index).float()
         new_logits = logits.clone()  # Create a copy to avoid in-place modification
-        labels[labels == LabelSmoother.ignore_index] = 0 
-        output = torch.gather(new_logits, dim=-1, index=labels.unsqueeze(-1)).squeeze(-1)
+        new_labels = labels.clone() # Create a copy to avoid in-place modification
+        new_labels[labels == LabelSmoother.ignore_index] = 0 
+        output = torch.gather(new_logits, dim=-1, index=new_labels.unsqueeze(-1)).squeeze(-1)
         output = output * mask # B * L
         return output
 
@@ -168,34 +169,43 @@ class RRHFTrainer(Trainer):
 
     def sft_loss(self, logit_label, idxs, rw_scores):
         max_idx = torch.argmax(rw_scores)
-        return -logit_label[max_idx].mean()
+        return -logit_label[max_idx].sum() / torch.count_nonzero(logit_label[max_idx])
 
     def compute_loss(self, model, inputs, return_outputs=False):
-        # rank0_print("inputs: ", inputs["input_ids"].shape)
         input_ids = inputs["input_ids"].squeeze(0)
         # rank0_print("input_ids: ", input_ids.shape)
         attention_mask = inputs["attention_mask"].squeeze(0)
         logits = model(input_ids=input_ids, attention_mask=attention_mask)[0] # (batch * cand) * L * V
         # rank0_print("logits: ", logits.shape)
-        logits = F.log_softmax(logits, dim=-1)
-        # rank0_print("logits: ", logits.shape)
         labels = inputs["labels"].squeeze(0)
         # rank0_print("labels: ", labels.shape)
+
+        # Shift so that tokens < n predict n
+        logits = logits[..., :-1, :].contiguous()
+        labels = labels[..., 1:].contiguous()
+        # Enable model parallelism
+        labels = labels.to(logits.device)
+
+        logits = F.log_softmax(logits, dim=-1)
+        # rank0_print("logits: ", logits.shape)
         logit_label = self.gather_logits_labels(logits, labels)
         # rank0_print("logit_label:", logit_label.shape)
         scores = self.get_score(logit_label, labels)
         # rank0_print("scores:", scores)
         rrhf_loss = self.rrhf_loss(scores, inputs.get("idxs"), inputs.get("scores"))
         sft_loss = self.sft_loss(logit_label, inputs.get("idxs"), inputs.get("scores"))
-        rank0_print("rrhf_loss: ", rrhf_loss)
-        rank0_print("sft_loss: ", sft_loss)
-        wandb.log({"rrhf_loss": rrhf_loss}, step=self.global_step)
-        wandb.log({"sft_loss": sft_loss}, step=self.global_step)
+        # rank0_print(f"{'rrhf_loss': {rrhf_loss.item()}}")
+        # rank0_print(f"{'sft_loss': {sft_loss.item()}}")
+        if is_rank_0():
+            wandb.log({"train/rrhf_loss": rrhf_loss}, step=self.state.global_step)
+            wandb.log({"train/sft_loss": sft_loss}, step=self.state.global_step)
         loss = self.args.rrhf_weight * rrhf_loss + sft_loss
         return (loss, scores) if return_outputs else loss
 
 def train():
     global local_rank
+
+    # torch.set_printoptions(threshold=10000)
 
     parser = transformers.HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
